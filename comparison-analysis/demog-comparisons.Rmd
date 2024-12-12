@@ -1,0 +1,206 @@
+---
+title: "EPA SAB Demographic Comparisons"
+author: "Gabriel Watson"
+date: "2024-06-26"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(aws.s3)
+library(sf)
+library(rlang)
+library(randomcoloR)
+
+epic_palette <- colorRampPalette(c("#172f60","#4ea324"))
+sysfonts::font_add_google("Lato")
+showtext::showtext_auto()
+```
+
+
+```{r}
+
+epa <- aws.s3::s3read_using(st_read, 
+                                      object = "service_area_boundaries/epa-sabs/epa-sabs-crosswalk.geojson",
+                                      bucket = "tech-team-data",
+                                      quiet = TRUE)
+epic <- aws.s3::s3read_using(st_read, 
+                                      object = "service_area_boundaries/epa-sabs/epic-sabs-crosswalk.geojson",
+                                      bucket = "tech-team-data",
+                                      quiet = TRUE)
+```
+
+
+```{r}
+demographic_comparisons <- function(var)
+{
+print(var)
+omit_vars <- c('pwsid','estimate_total_pop','estimate_hh_total')
+
+if(var == "estimate_mhi" || var == "estimate_hh_below_pov")
+{
+epa_subset <- epa %>%
+              data.frame()%>%
+              select(c(omit_vars, {{var}}))%>%
+              mutate(!!var := !!sym(var)/estimate_hh_total)%>%
+              rename_at(vars(-c(pwsid)), ~ paste0(., "_epa"))
+
+ epic_subset <- epic %>%
+               data.frame()%>%
+               select(c(omit_vars, {{var}}))%>%
+               mutate(!!var := !!sym(var)/estimate_hh_total)%>%
+               rename_at(vars(-c(pwsid)), ~ paste0(., "_epic"))
+  
+}
+else
+{
+epa_subset <- epa %>%
+              data.frame()%>%
+              select(c(omit_vars, {{var}}))%>%
+               mutate(!!var := !!sym(var)/estimate_total_pop)%>%
+              rename_at(vars(-c(pwsid)), ~ paste0(., "_epa"))
+
+epic_subset <- epic %>%
+               data.frame()%>%
+               select(c(omit_vars, {{var}}))%>%
+               mutate(!!var := !!sym(var)/estimate_total_pop)%>%
+               rename_at(vars(-c(pwsid)), ~ paste0(., "_epic"))
+}
+comparison <- full_join(epa_subset, epic_subset)%>%
+              mutate(var_dif := !!sym(paste0(var,"_epa"))/!!sym(paste0(var,"_epic")))%>%
+              rename(!!sym(var) := var_dif)
+              
+
+return(comparison)
+}
+```
+
+
+```{r}
+columns <- colnames(epa %>% data.frame() %>% select(estimate_total_pop:estimate_hh_below_pov_per))
+columns <- columns[!grepl("per", columns, ignore.case = TRUE)]
+
+combined_pwsids <- union(epa$pwsid, epic$pwsid)
+results_df <- data.frame(pwsid = combined_pwsids)
+for (var in columns) {
+
+## creating folder for save out 
+path <- paste0("results/")
+dir.create(file.path(path), recursive = TRUE)
+
+comparisons <- demographic_comparisons(c(var))
+
+comparisons <- left_join(comparisons, epa %>% data.frame() %>% select(pwsid, method))
+scatter <- ggplot(data = comparisons, aes(x = !!sym(paste0(var,"_epa")), y = !!sym(paste0(var,"_epic"))))+
+           geom_point(aes(fill = as.factor(method), size = sqrt(estimate_total_pop_epic)),shape = 21, color = "grey" )+
+           xlim(0,1)+
+           ylim(0,1)+
+           geom_abline(intercept = 0, slope = 1, size = 1, color = "black")+
+           theme_minimal()
+
+ggsave(paste0(path, var, "_scatter.jpeg"), plot = scatter, width = 25, height = 25, units = c("cm"), dpi = 300)
+
+results_df <- left_join(results_df, comparisons %>% select(c(pwsid,{{var}})))
+}
+```
+
+## Review of Charts Above 
+
+## Next Steps 
+## Output full file for making a table of deviation
+## FYI > 1 means EPA dataset has a higher percentage within sabs (averager)
+```{r}
+
+epa_universe <- epa %>%
+                data.frame()%>% 
+                select(c('pwsid','estimate_total_pop','estimate_hh_total')) %>%
+                rename_at(vars(-c(pwsid)), ~ paste0(., "_epa"))
+
+epic_universe <- epic %>%
+                 data.frame() %>% 
+                 select(c('pwsid','estimate_total_pop','estimate_hh_total')) %>%
+                 rename_at(vars(-c(pwsid)), ~ paste0(., "_epic"))                
+
+results_df_full <- left_join(results_df, 
+                        full_join(epa_universe,epic_universe))
+
+results_df_full <- results_df_full %>%
+           mutate(estimate_total_pop = estimate_total_pop_epa/estimate_total_pop_epic)%>%
+           mutate(estimate_hh_total = estimate_hh_total_epa/estimate_hh_total_epic)%>%
+           select(-c(estimate_hh_total_epa,estimate_hh_total_epic))
+
+results_df_full[sapply(results_df_full, is.infinite)] <- NA
+results_df_full[sapply(results_df_full, is.nan)] <- NA
+
+results_df_full <- left_join(results_df_full, epa %>% data.frame() %>% select(pwsid, method))
+
+
+results_df_summary <- results_df_full %>%
+                      summarize_if(is.numeric, mean, na.rm = TRUE)
+
+write.csv(results_df_full,paste0("data/results/results_df_summary_", Sys.Date()))
+
+## Population change scatter 
+ggplot(data = results_df_full, aes(y = estimate_total_pop, 
+                                   x = estimate_total_pop_epic))+
+  geom_point(aes(fill = as.factor(method)), shape = 21, size = 3, 
+             alpha = 0.7)+
+  theme_minimal()+
+  ylim(1.1,250)+
+  xlim(0,9000)+
+  # ylab("Percent Change - EPA / EPIC")+
+  # xlab("EPIC Service Area Boundary Population") +
+  # # scale_fill_viridis(discrete = TRUE, direction = -1, name = "Method")
+  # # scale_y_continuous(labels = scales::label_percent())
+  # scale_fill_manual(name = "Method", values = c("#791a7b", "#b15712",
+  #                                         "#1054a8", "#de9d29", "#172f60",
+  #                                         "#4ea324")) + 
+    scale_fill_manual(name = "Method", values = c("#B077B2", "#b15712",
+                                                "#527CAF", "#E4BE7C", "#526489",
+                                                "#82AB6E")) + 
+  labs(x = "EPIC Service Area Boundary Population", y = "Percent Change - EPA / EPIC") + 
+  theme(legend.position = "bottom", 
+        text = element_text(size = 13, family = "Lato")) 
+    # scale_y_continuous(labels = scales::label_percent())
+
+# need: 7 
+
+```
+#Total Summary 
+```{r}
+
+epa_summary <- epa %>%
+               data.frame() %>% 
+               select(pwsid, estimate_total_pop:estimate_hh_below_pov_per)%>%
+               summarize_if(is.numeric, sum, na.rm = TRUE)
+
+epic_summary <- epic %>%
+               data.frame() %>% 
+               select(pwsid, estimate_total_pop:estimate_hh_below_pov_per)%>%
+               summarize_if(is.numeric, sum, na.rm = TRUE)
+
+```
+
+Tidying the latino/a plot for the blog rollout:  
+```{r}
+var <- "estimate_hisp_alone"
+# I then ran through the loop that made all the charts with the var 
+# specified above
+
+var_plot <- ggplot(data = comparisons, aes(x = !!sym(paste0(var,"_epa")), 
+                               y = !!sym(paste0(var,"_epic")))) +
+  geom_point(aes(fill = as.factor(method)), shape = 21, color = "black", 
+             size = 3, 
+             alpha = 0.7)+
+  theme_minimal() + 
+    scale_fill_manual(name = "Method", values = c("#B077B2", "#b15712",
+                                                "#527CAF", "#E4BE7C", "#526489",
+                                                "#82AB6E")) +
+  labs(x = "Percent Latino/a EPA", y = "Percent Latino/a EPIC") + 
+  theme(legend.position = "bottom", 
+        text = element_text(size = 100, family = "Lato")) + 
+  scale_y_continuous(labels = scales::label_percent()) + 
+  scale_x_continuous(labels = scales::label_percent())
+
+ggsave("./results/hisp_alone_comp.png", plot = var_plot, dpi = 600)
+```

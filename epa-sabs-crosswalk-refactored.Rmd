@@ -1,0 +1,354 @@
+---
+title: "epa-sabs-crosswalk-refactored"
+author: "EmmaLi Tsai"
+date: "2024-12-10"
+output: html_document
+---
+
+Setting up environment - libraries & datasets: 
+```{r}
+# TODO - overall methods doc???
+
+# functions for pulling in SABs & census variable sheet
+library(googlesheets4)
+library(aws.s3)
+# function dependencies:
+library(tidyverse)
+library(sf)
+library(tidycensus)
+
+# enable caching for the census
+options(tigris_use_cache = TRUE)
+
+# reading in function
+source("./functions/state_sab_crosswalk_refactored.R")
+
+# reading in SABs
+epa_sabs <- aws.s3::s3read_using(st_read,
+                                 object = "/service_area_boundaries/epa-sabs/epa-sabs-all.geojson",
+                                 bucket = "tech-team-data")
+
+# reading in your census vars and calculations from google sheet
+gs4_deauth()
+URL <- "https://docs.google.com/spreadsheets/d/1UvFjxOm1Q06ZEDXr98Pt0uvLFabsGA8IT8eEJrQN9pg/edit?usp=drive_link"
+census_var_sheet <- read_sheet(URL, sheet = "census_var_table") %>%
+  janitor::clean_names() %>%
+  # make sure census vars are all uppercase:
+  mutate(var = toupper(var))
+```
+
+## Updating blue conduit crosswalk (only need to run this if it has been updated - already completed by EPIC)
+```{r}
+# NOTE - you usually don't need to run this. It's really only when 
+# the block-parcel xwalk is updated. 
+
+# Prepping new xwalk from blue conduit - these are the new crosswalk 
+# files by EPA boundaries. Received from Raanan on September 2024
+
+#### Translating this to census tracts: ######
+# translating this to census tracts
+pwsid_blockgroup_crosswalk <- xwalk_blockgroup %>%
+  # if census_blockgroup is missing preceding 0, add it back in
+  mutate(census_blockgroup = as.character(census_blockgroup),
+         census_blockgroup = case_when(
+           str_length(census_blockgroup) == 11 ~ paste0(0, census_blockgroup),
+           TRUE ~ census_blockgroup
+         ))
+
+# recalculate overlaps to get census tracts: 
+pwsid_tract_crosswalk <- pwsid_blockgroup_crosswalk %>%
+  mutate(tract_geoid = str_sub(census_blockgroup, 1, 11)) %>%
+  group_by(pwsid, tract_geoid) %>%
+  summarize(tract_parcel_count = sum(parcels_in_group),
+            tract_overlap_parcel_count = sum(parcels_overlap_count),
+            tract_parcel_weight = min(tract_overlap_parcel_count / tract_parcel_count, 1))
+
+# # writing to aws:
+# tmp <- tempfile()
+# write.csv(pwsid_tract_crosswalk, file = paste0(tmp, ".csv"))
+# on.exit(unlink(tmp))
+# aws.s3::put_object(
+#   file = paste0(tmp, ".csv"),
+#   object = "/pws_crosswalk/EPA_SABS_parcel_weighted_pwsid_census_tracts.csv",
+#   bucket = "tech-team-data",
+# )
+
+```
+
+## Step one: crosswalk your selection of EPA SABs: 
+```{r}
+# example of running it on the Navajo Nation: 
+# sab_test <- epa_sabs %>%
+#   filter(state == "NN")
+# 
+# test_mult_states <- sab_crosswalk(sab_test, "2021", census_var_sheet)
+
+# run the xwalk nationally:
+full_xwalk <- sab_crosswalk(epa_sabs, "2021", census_var_sheet)
+```
+
+## Step two: adding SDWIS summary stats 
+```{r}
+# grabbing list of pwsids: 
+epa_pwsids <- unique(epa_sabs$pwsid)
+
+# code for downloading the data locally instead of pulling from aws: 
+# file_loc <- "./data/sdwa_download_dec"
+# download.file("https://echo.epa.gov/files/echodownloads/SDWA_latest_downloads.zip", 
+#               destfile = paste0(file_loc, ".zip"))
+# unzip(zipfile = paste0(file_loc, ".zip"), exdir = file_loc) 
+# file.remove(paste0(file_loc, ".zip"))
+
+
+# grabbing water system information: 
+sdwa_ws_info <- aws.s3::s3read_using(read.csv,
+                                     object = "/service_area_boundaries/epa-sabs/SDWA_latest_downloads/SDWA_PUB_WATER_SYSTEMS.csv",
+                                     bucket = "tech-team-data") %>%
+  janitor::clean_names() 
+# grabbing simple information on water systems: 
+sdwa_ws_simple <- sdwa_ws_info %>%
+  filter(pwsid %in% epa_pwsids) %>%
+  select(pwsid, primacy_agency_code, owner_type_code, 
+         primacy_type, primary_source_code)
+
+
+# violation data:
+sdwa_viols <- aws.s3::s3read_using(read.csv,
+                                   object = "/service_area_boundaries/epa-sabs/SDWA_latest_downloads/SDWA_VIOLATIONS_ENFORCEMENT.csv",
+                                   bucket = "tech-team-data") %>%
+  janitor::clean_names() 
+
+# violation codes:
+sdwa_codes <- aws.s3::s3read_using(read.csv,
+                                   object = "/service_area_boundaries/epa-sabs/SDWA_latest_downloads/SDWA_REF_CODE_VALUES.csv",
+                                   bucket = "tech-team-data") %>%
+  janitor::clean_names() 
+
+# rule codes: 
+rule_codes <- sdwa_codes %>% 
+  filter(value_type %in% c("RULE_FAMILY_CODE")) %>%
+  rename(rule = value_description)
+
+
+# merging by rule code
+viol_rulecode <- merge(sdwa_viols, rule_codes, 
+                       by.x = "rule_family_code", 
+                       by.y = "value_code", 
+                       all.x = T) %>%
+  filter(pwsid %in% epa_sabs$pwsid) %>%
+### START OF STEPS FROM EMAIL: ################################################
+  # STEP ONE: concatenate PWSID and violation_id to create a unique identifier: 
+  mutate(pwsid_viol_id = paste0(pwsid, "-", violation_id)) %>%
+  # STEP TWO: remove duplicates, keep distinct records using unique ID from 
+  # step 1: 
+  distinct(pwsid_viol_id, .keep_all = T)
+
+# filtering for past 10 years of violations and for health-based: 
+epa_viol_simple <- viol_rulecode %>%
+  # just grabbing health violations: 
+  filter(is_health_based_ind == "Y") %>%
+  mutate(viol_date = as.Date(compl_per_begin_date, tryFormats = c("%m/%d/%Y")), 
+         viol_year = year(viol_date)) %>%
+  # filtering for past 10 years: 
+  filter(viol_year >= (year(Sys.Date())-10)) 
+
+# summarizing by pwsid and rule: 
+epa_viol_summary <- epa_viol_simple %>%
+  group_by(pwsid, rule) %>%
+  summarize(total_health_violations_10yr = n()) %>%
+  # pivot wide to make it easier for analysis: 
+  pivot_wider(., names_from = rule, values_from = total_health_violations_10yr) %>%
+  # cleaning & replacing NAs w/ zeros, since these are true zeros: 
+  janitor::clean_names() %>%
+  mutate(across(everything(), ~replace_na(.x, 0)))
+
+
+# grabbing total violations over all of SDWIS: 
+total_viols <- viol_rulecode %>% 
+  group_by(pwsid) %>%
+  summarize(violations_all_years = n(), 
+            health_violations_all_years = sum(is_health_based_ind == "Y"))
+
+# grabbing list of PWSIDs with open health violations 
+open_viol <- viol_rulecode %>%
+  filter(is_health_based_ind == "Y") %>%
+  filter(violation_status %in% c("Addressed", "Unaddressed"))
+
+# final merging: 
+final_viol_summary <- merge(epa_viol_summary, total_viols, 
+                            by = "pwsid", all = T) %>%
+  # there may be some pwsids w/o health violations over the past 10 years, 
+  # but health violations in the past 
+  mutate(across(everything(), ~replace_na(.x, 0))) %>%
+  mutate(health_viols_10yr = rowSums(select(., stage_2_disinfectants_and_disinfection_byproducts_rule:volatile_organic_chemicals))) %>%
+  mutate(open_health_viol = case_when(pwsid %in% open_viol$pwsid ~ "Yes", 
+                                      TRUE ~ "No"))
+
+# adding original water system information:
+viol_ws_summary <- merge(final_viol_summary, sdwa_ws_simple, 
+                         by = "pwsid", all.y = T) %>%
+  relocate(primacy_agency_code:primary_source_code, .after = "pwsid")
+```
+
+## Step three: adding EJScreen dw score 
+```{r}
+## EJ screen dw metric - grabbing state data at the tract level 
+# TODO - migrate this to API? 
+file_loc <- "./data/ejscreen"
+download.file("https://gaftp.epa.gov/EJScreen/2024/2.32_August_UseMe/EJScreen_2024_Tract_StatePct_with_AS_CNMI_GU_VI.csv.zip",
+              destfile = paste0(file_loc, ".zip"))
+unzip(zipfile = paste0(file_loc, ".zip"), exdir = file_loc) 
+file.remove(paste0(file_loc, ".zip"))
+
+# tidying and querying for OR: 
+ejscreen <- read.csv(paste0(file_loc, "/", list.files(file_loc))) %>%
+  janitor::clean_names() %>%
+ # if the geoid is missing prefix 0, add it back in
+    mutate(id = as.character(id),
+           id = case_when(
+             str_length(id) == 10 ~ paste0(0, id),
+             TRUE ~ id
+           ))
+
+# from data dictionary & technical documentation: 
+# - dwater = drinking water non-compliance (I think this is the raw score)
+# - p_d2_dwater = percentile for drinking water non-compliance EJ index
+# - p_d5_dwater = percentile for drinking water non-compliance supplemental index (?)
+
+# based on technical info, the geographic framework is 2022 census data, so 
+# we should use these boundaries for interpolation 
+
+# grabbing states to loop through: 
+states <- unique(epa_sabs$state)
+# removing empty strings for now: 
+states <- states[nzchar(states)]
+# we don't have census data for these states: 
+removes_states <- c("NN", "10")
+states <- states[!grepl(paste0(removes_states, collapse = "|"), states)]
+states <- states[!is.na(states)]
+
+tract_geo <- tidycensus::get_acs(
+  geography = "tract", 
+  variables = c(total_pop = "B01003_001"), 
+  state = states,
+  year = 2022,
+  geometry = TRUE
+)
+
+# merging tract geometries with tract geoids from the ejscreen csv file 
+ejscreen_geo <- merge(ejscreen, tract_geo, 
+                      by.x = "id", by.y = "GEOID", 
+                      all.x = T) %>%
+  st_as_sf() %>%
+  # just grabbing our columns of interest - think dwater is the raw score for
+  # interpolating based on tech documentation & data dictionary
+  select(id, state_name, cnty_name, dwater)
+
+
+# using areal interpolation to get a weighted mean of dwater score
+# using Albers equal area 
+ejscreen_geo_planar <- ejscreen_geo %>%
+  st_transform(., crs = "ESRI:102003") %>%
+  filter(!(st_is_empty(.)))
+
+epa_sabs_planar <- epa_sabs %>% 
+  st_transform(., crs = "ESRI:102003") %>%
+  st_make_valid(., geos_method = "valid_linework")
+
+# interpolating using weighted mean: 
+ej_interp_dw <- areal::aw_interpolate(epa_sabs_planar, 
+                                      tid="pwsid", 
+                                      source=ejscreen_geo_planar, 
+                                      sid="id", 
+                                      weight = "sum",
+                                      output="sf",
+                                      intensive=c("dwater"))
+
+# grabbing most basic components: 
+pwsid_dw_simple <- ej_interp_dw %>%
+  as.data.frame() %>%
+  select(pwsid, dwater)
+```
+
+## Step four: add HUC well and intake information: 
+```{r}
+# reading intake & well information for PWSIDs: 
+intake <- aws.s3::s3read_using(read.csv, 
+                               object = "s3://tech-team-data/state-drinking-water/national/Intake_HUC12.csv") %>%
+  janitor::clean_names() %>%
+  mutate(intake_huc12 = as.numeric(huc12), 
+         pwsid = case_when(nchar(pwsid) == 8 ~ paste0("0", pwsid), 
+                           TRUE ~ pwsid))
+
+well <- aws.s3::s3read_using(read.csv, 
+                             object = "s3://tech-team-data/state-drinking-water/national/Wells_HUC12.csv") %>%
+  janitor::clean_names() %>%
+  mutate(well_huc12 = as.numeric(huc12), 
+         pwsid = case_when(nchar(pwsid) == 8 ~ paste0("0", pwsid), 
+                           TRUE ~ pwsid))
+
+# grabbing all HUCs by pwsid: 
+well_pwsid_hucs <- well %>%
+  group_by(pwsid) %>%
+  summarize(all_well_hucs = paste(unique(well_huc12), collapse = ", "))
+
+intake_pwsid_hucs <- intake %>%
+  group_by(pwsid) %>%
+  summarize(all_intake_hucs = paste(unique(intake_huc12), collapse = ", "))
+
+# combining everything: 
+pwsid_hucs <- merge(well_pwsid_hucs, intake_pwsid_hucs, by = "pwsid", all = T)
+
+```
+
+## Step five: merging! 
+```{r}
+# combine crosswalk with violations: 
+xwalk_viols <- merge(full_xwalk, 
+                     viol_ws_summary, 
+                     by = "pwsid", all = T) %>%
+  # crosswalking owner type code 
+  mutate(owner_type = case_when(
+    owner_type_code == "F" ~ "Federal", 
+    owner_type_code == "L" ~ "Local", 
+    owner_type_code == "M" ~ "Public/Private", 
+    owner_type_code == "N" ~ "Native American", 
+    owner_type_code == "P" ~ "Private", 
+    owner_type_code == "S" ~ "State", 
+  )) %>%
+  relocate(primacy_agency_code:primary_source_code, .before = crosswalk_state) %>%
+  relocate(owner_type, .after = owner_type_code)
+# there are ~200 or so PWSIDs not in the final_viol_summary, suggesting 
+# they don't have any violations. 
+xwalk_viols <- xwalk_viols %>%
+  mutate(across(lead_and_copper_rule:health_viols_10yr, ~replace_na(.x, 0))) %>%
+  mutate(open_health_viol = case_when(is.na(open_health_viol) ~ "No", 
+         TRUE ~ open_health_viol))
+
+
+# adding drinking water metric: 
+xwalk_viols_dw <- merge(xwalk_viols, 
+                        pwsid_dw_simple, 
+                        by = "pwsid", all = T)
+
+# adding HUCs
+final_xwalk <- merge(xwalk_viols_dw, 
+                     pwsid_hucs, all.x = T)
+
+# st_write(final_xwalk, "./data/epa_complete_xwalk_extrastats.geojson")
+# final_xwalk <- st_read( "./data/epa_complete_xwalk_extrastats.geojson")
+```
+
+## Step six: updating S3
+```{r}
+# writing full xwalk to aws:
+# tmp <- tempfile()
+# st_write(final_xwalk, dsn = paste0(tmp, ".geojson"))
+# on.exit(unlink(tmp))
+# aws.s3::put_object(
+#   file = paste0(tmp, ".geojson"),
+#   object = "/service_area_boundaries/epa-sabs/epa-sabs-crosswalk-acs2021.geojson",
+#   bucket = "tech-team-data",
+# )
+```
+

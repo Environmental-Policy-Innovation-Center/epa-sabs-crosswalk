@@ -1,0 +1,1869 @@
+---
+title: "epa-sabs-comparison"
+author: "EmmaLi Tsai"
+date: "2024-06-18"
+output: html_document
+---
+
+# Libraries: 
+```{r}
+library(tidyverse)
+library(arcpullr)
+library(aws.s3)
+library(leaflet)
+library(sf)
+library(tidycensus)
+library(viridis)
+options(tigris_use_cache = TRUE)
+
+epic_palette <- colorRampPalette(c("#172f60","#4ea324"))
+sysfonts::font_add_google("Lato")
+showtext::showtext_auto()
+```
+
+# Loading data: 
+```{r}
+# EPIC's sabs data: 
+epic_sab <- sf::st_read("https://www.hydroshare.org/resource/c9d8a6a6d87d4a39a4f05af8ef7675ad/data/contents/ref_pws.gpkg")
+# grabbing Texas and Oregon as interesting cases for exploration: 
+epic_tx_sab <- epic_sab %>% 
+  filter(state_code == "TX")
+epic_or_sab <- epic_sab %>% 
+  filter(state_code == "OR")
+
+
+# EPA's sabs data: 
+# epa_sab_layer <- arcpullr::get_spatial_layer(url = "https://services.arcgis.com/cJ9YHowT8TU7DUyn/ArcGIS/rest/services/Water_System_Boundaries/FeatureServer/0")
+# all_epa_data <- epa_sab_layer %>%
+#   janitor::clean_names()
+
+# Writing this to s3: 
+# tmp <- tempfile()
+# st_write(all_epa_data, dsn = paste0(tmp, ".geojson"))
+# on.exit(unlink(tmp))
+# put_object(
+#   file = paste0(tmp, ".geojson"),
+#   object = "/service_area_boundaries/epa-sabs/epa-sabs-all.geojson",
+#   bucket = "tech-team-data",
+# )
+
+# reading from s3: 
+epa_sab <- aws.s3::s3read_using(st_read, 
+                                object = "service_area_boundaries/epa-sabs/epa-sabs-all.geojson",
+                                bucket = "tech-team-data")
+# grabbing Texas and Oregon as interesting cases for exploration: 
+epa_tx_sab <- epa_sab %>% 
+  filter(state == "TX")
+epa_or_sab <- epa_sab %>% 
+  filter(state == "OR")
+
+# loading our crosswalk function: 
+source("./functions/state_sab_crosswalk.R")
+```
+
+# Exploring SABs in TX: 
+```{r}
+# quick map to see overall coverage: 
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.VoyagerNoLabels, group = "Toner Lite") %>%
+  addPolygons(data = epa_tx_sab,
+              fillOpacity = 0.3,
+              stroke = TRUE,
+              color = "black",
+              fillColor = "red",
+              weight = 1,
+              label = paste0("pwsid: ", epa_tx_sab$pwsid,
+                             "; pop: ", epa_tx_sab$population_served_count)) %>%
+  addPolygons(data = epic_tx_sab,
+              fillOpacity = 0.3,
+              stroke = TRUE,
+              color = "black",
+              fillColor = "blue",
+              weight = 1,
+              label = paste0("pwsid: ", epic_tx_sab$pwsid,
+                             "; pop: ", epic_tx_sab$population_served_count))
+
+# purple = covered in both datasets, likely from TWDB 
+# light blue = covered in epic dataset but not epa 
+# light red = covered in epa dataset but not epic
+
+# they're fairly close, which makes sense since most of them were reported by the 
+# state. The differences are really in the modeled service areas 
+
+
+# how do populations and service connections match? 
+ggplot(epic_tx_sab, aes(x = population_served_count, y = service_connections_count)) + 
+  geom_point() + 
+  geom_point(data = epa_tx_sab, aes(x = population_served_count, y = service_connections_count), 
+             color = "red") + 
+  theme_bw() 
+
+```
+
+# Exploring SABs in OR: 
+```{r}
+# quick map to see overall coverage: 
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.VoyagerNoLabels, group = "Toner Lite") %>%
+  addPolygons(data = epa_or_sab,
+              fillOpacity = 0.3,
+              stroke = TRUE,
+              color = "black",
+              fillColor = "red",
+              weight = 1,
+              label = paste0("pwsid: ", epa_or_sab$pwsid,
+                             "; pop: ", epa_or_sab$population_served_count)) %>%
+  addPolygons(data = epic_or_sab,
+              fillOpacity = 0.3,
+              stroke = TRUE,
+              color = "black",
+              fillColor = "blue",
+              weight = 1,
+              label = paste0("pwsid: ", epic_or_sab$pwsid,
+                             "; pop: ", epic_or_sab$population_served_count)) 
+
+# purple = covered in both datasets
+# light blue = covered in epic dataset but not epa 
+# light red = covered in epa dataset but not epic
+
+# woooow this is interesting as a state that doesn't report SABs
+
+# how do populations and service connections match? 
+ggplot(epic_or_sab, aes(x = population_served_count, y = service_connections_count)) + 
+  geom_point() + 
+  geom_point(data = epa_or_sab, aes(x = population_served_count, y = service_connections_count), 
+             color = "red") + 
+  theme_bw() 
+```
+
+# Creating a file with the correct order of census columns for function argument: 
+```{r}
+# California's census columns get organized differently for some reason and 
+# it's important that they're all identical - creating a file with the column 
+# names that we can use as a function argument: 
+# census_vars <- c(total_pop = "B01003_001",
+#                  # race and ethnicity stats: 
+#                  black_alone = "B02001_003", 
+#                  asian_alone = "B02001_005", 
+#                  white_alone = "B02001_002", 
+#                  AIAN_alone = "B02001_004", 
+#                  NAPI_alone = "B02001_006", 
+#                  other_alone = "B02001_007", 
+#                  mixed_alone = "B02001_008",
+#                  hisp_alone = "B03003_003", 
+#                  # MHI
+#                  mhi = "B19013_001", 
+#                  # labor force and unemployment: 
+#                  laborforce = "B23025_003",  # universe: pop > 16
+#                  laborforce_unemployed = "B23025_005", # universe: pop > 16
+#                  # households below poverty level: 
+#                  hh_total = "B17017_001",
+#                  hh_below_pov = "B17017_002", 
+#                  # age cats: 
+#                  ageunder_5  = "B06001_002",
+#                  age5_17 = "B06001_003", 
+#                  age18_24 = "B06001_004",
+#                  age25_34 = "B06001_005", 
+#                  age35_44 = "B06001_006", 
+#                  age45_54 = "B06001_007", 
+#                  age55_59 = "B06001_008", 
+#                  age60_61 = "B06001_009",
+#                  # language spoken at home: 
+#                  only_english = "B99162_002",  # universe: pop >5
+#                  other_lang = "B99162_003", # universe: pop >5
+#                  # education categories: 
+#                  no_school = "B15003_002", 
+#                  high_school = "B15003_017", 
+#                  bachelors = "B15003_022",
+#                  prof_degree = "B15003_024", 
+#                  # nationality: 
+#                  foreign = "B99051_005")
+# 
+# census <- tidycensus::get_acs(
+#   geography = "tract", 
+#   variables = census_vars, 
+#   state = "WY", 
+#   year = 2020,
+#   geometry = TRUE
+# )
+
+# pivoting census to wide format: 
+
+# census_wide <- pivot_wider(census, 
+#                            names_from = c("variable"), 
+#                            values_from = c("estimate", "moe"))
+# census_col_order <- names(census_wide)
+# saveRDS(census_col_order, file = "./data/census_col_names.rds")
+```
+
+# Running crosswalk function for EPA boundaries: 
+```{r}
+# grabbing correct column names: 
+census_col_order <- readRDS("./data/census_col_names.rds")
+
+# grabbing states to loop through: 
+states <- unique(epa_sab$state)
+# removing empty strings for now: 
+states <- states[nzchar(states)]
+# we don't have census data for these, nor do they exist in the blue conduit 
+# crosswalk:
+removes_states <- c("NN", "10")
+states <- states[!grepl(paste0(removes_states, collapse = "|"), states)]
+states <- states[!is.na(states)]
+
+################################################################################
+# loopin' for the EPA boundaries - this could technically be it's own function, 
+# but this was easier to troubleshoot while building 
+################################################################################
+# empty df to store results: 
+state_crosswalk_df_epa <- data.frame() 
+
+for(i in 1:length(states)){
+  # grabbing function arguments: 
+  state_i <- states[i]
+  crs <- "WGS84"
+  sab_i <- epa_sab %>% 
+    filter(state == state_i)
+  
+  # helper function to keep track of loop: 
+  message(paste0("Working on: ", state_i, "; for: EPA's boundaries"))
+
+  # crosswalkin'
+  state_crosswalk_i <- state_sab_crosswalk(sab_i, state_i, crs, census_col_order)
+  
+  # bindin' - adding this globally which isn't best practice but I wanted
+  # to keep the data if the loop breaks
+  state_crosswalk_df_epa <<- rbind(state_crosswalk_df_epa, state_crosswalk_i)
+  
+  # beep so I can hear that it's still going
+  # beepr::beep(9)
+}
+
+# st_write(state_crosswalk_df_epa, "./data/epa_xwalk.geojson")
+
+# Writing this to s3: 
+# tmp <- tempfile()
+# st_write(state_crosswalk_df_epa, dsn = paste0(tmp, ".geojson"))
+# on.exit(unlink(tmp))
+# put_object(
+#   file = paste0(tmp, ".geojson"),
+#   object = "/service_area_boundaries/epa-sabs/epa-sabs-crosswalk.geojson",
+#   bucket = "tech-team-data",
+# )
+```
+
+# Running crosswalk function for hydroshare boundaries: 
+```{r} 
+# grabbing correct column names: 
+census_col_order <- readRDS("./data/census_col_names.rds")
+
+# filtering for states above: 
+epic_sab <- epic_sab %>%
+  rename(state = state_code) 
+
+################################################################################
+# loopin' for the hydroshare boundaries
+################################################################################
+# empty df to store results: 
+state_crosswalk_df_epic <- data.frame() 
+
+for(i in 1:length(states)){
+  # grabbing function arguments: 
+  state_i <- states[i]
+  crs <- "WGS84"
+  sab_i <- epic_sab %>% 
+    filter(state == state_i)
+  
+  # helper function to keep track of loop: 
+  message(paste0("Working on: ", state_i, "; for: EPIC's boundaries"))
+
+  # crosswalkin'
+  state_crosswalk_i <- state_sab_crosswalk(sab_i, state_i, crs, census_col_order)
+  
+  # bindin' - adding this globally which isn't best practice but I wanted
+  # to keep the data if the loop breaks
+  state_crosswalk_df_epic <<- rbind(state_crosswalk_df_epic, state_crosswalk_i)
+  
+  # beep so I can hear that it's still going
+  # beepr::beep(9)
+}
+
+# st_write(state_crosswalk_df_epic, "./data/epic_xwalk.geojson")
+
+# Writing this to s3: 
+# tmp <- tempfile()
+# st_write(state_crosswalk_df_epic, dsn = paste0(tmp, ".geojson"))
+# on.exit(unlink(tmp))
+# put_object(
+#   file = paste0(tmp, ".geojson"),
+#   object = "/service_area_boundaries/epa-sabs/epic-sabs-crosswalk.geojson",
+#   bucket = "tech-team-data",
+# )
+```
+
+# Checking & comparing output: 
+```{r}
+# reading xwalk datasets: 
+epic_xwalk <- aws.s3::s3read_using(st_read, 
+                                   object = "service_area_boundaries/epa-sabs/epic-sabs-crosswalk.geojson",
+                                   bucket = "tech-team-data")
+
+epa_xwalk <- aws.s3::s3read_using(st_read, 
+                                  object = "service_area_boundaries/epa-sabs/epa-sabs-crosswalk.geojson",
+                                  bucket = "tech-team-data")
+
+# checking out the number of sabs in each dataset: 
+epa_xwalk_sab_summary <- epa_xwalk %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(crosswalk_state) %>%
+  summarize(num_sabs_epa_xwalk = n())
+
+epa_sab_summary <- epa_sab %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(state) %>%
+  summarize(num_sabs_epa= n()) 
+
+# making sure we have everything for all states: 
+merge(epa_sab_summary, epa_xwalk_sab_summary, by.x = "state", 
+      by.y = "crosswalk_state", all = T) %>%
+  mutate(diff = num_sabs_epa - num_sabs_epa_xwalk)
+# cool! we have everything where there are actual states! 
+# the EPA dataset does have 432 sabs w/o a state, 1 where the state == "10" 
+# which may be one tribal SAB, 126 with "NN" (Nigeria?!), and 2 with "NA"
+
+
+# doing the same for the EPIC dataset: 
+epic_xwalk_sab_summary <- epic_xwalk %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(crosswalk_state) %>%
+  summarize(num_sabs_epic_xwalk = n())
+
+epic_sab_summary <- epic_xwalk %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(state) %>%
+  summarize(num_sabs_epic= n()) 
+
+# making sure we have everything for all states: 
+merge(epic_sab_summary, epic_xwalk_sab_summary, by.x = "state", 
+      by.y = "crosswalk_state", all = T) %>%
+  mutate(diff = num_sabs_epic - num_sabs_epic_xwalk)
+# cool! we have 100% overlap! 
+
+
+# what about differences between states between the two methods?
+sab_comparison <- merge(epa_xwalk_sab_summary, epic_xwalk_sab_summary, 
+      by = "crosswalk_state", all = T) %>%
+  mutate(diff = num_sabs_epa_xwalk - num_sabs_epic_xwalk)
+# interesting - most of the time, hydroshare has more boundaries than the EPA. 
+# there are 6 states where the EPA has more, but only <= 30 SABs are added. 
+
+
+# checking some math with percentages: 
+check_pcts <- state_crosswalk_df_epa %>%
+  as.data.frame() %>%
+  select(c(tier_crosswalk, estimate_total_pop, 
+           estimate_laborforce, estimate_laborforce_unemployed, 
+           estimate_laborforce_per, 
+           estimate_laborforce_unemployed_per, 
+           estimate_white_alone_per, estimate_poc_alone_per, 
+           estimate_hh_total, estimate_hh_below_pov, estimate_hh_below_pov_per, 
+           estimate_mhi))
+
+
+###############################################################################
+# comparing st_make_valid and areas that were crosswalked: 
+###############################################################################
+tx_epa <- epa_xwalk %>%
+  filter(crosswalk_state == "TX")
+tx_epic <- epic_xwalk %>%
+  filter(crosswalk_state == "TX")
+
+# hmmmm holes are filled using st_make_valid - 351 boundaries in TX are not 
+# valid but need to be valid for pw interpolation 
+
+# look at % area increased - maybe add flag to xwalk datasets for sabs that 
+# were invalid geoms - 10% threshold 
+sum(!(st_is_valid(epa_tx_sab))) 
+not_valid <- epa_tx_sab[which(!st_is_valid(epa_tx_sab)),]
+test_epa <- st_make_valid(epa_tx_sab)
+
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.VoyagerNoLabels, group = "Toner Lite") %>%
+  addPolygons(data = epa_tx_sab,
+              fillOpacity = 0.3,
+              stroke = TRUE,
+              color = "black",
+              fillColor = "red",
+              weight = 1, 
+              label = paste0("original: ", epa_tx_sab$pwsid)) %>% 
+  addPolygons(data = tx_epa,
+              fillOpacity = 0.3,
+              stroke = TRUE,
+              color = "black",
+              fillColor = "blue",
+              weight = 1,
+              label = paste0("crosswalked: ", tx_epa$pwsid)) 
+
+# okay, can confirm that these boundaries are 100% identical, which 
+# makes sense because our crosswalk was built after this state and these 
+# boundaries
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.VoyagerNoLabels, group = "Toner Lite") %>%
+  addPolygons(data = tx_epic,
+              fillOpacity = 0.3,
+              stroke = TRUE,
+              color = "black",
+              fillColor = "red",
+              weight = 1) %>% 
+    addPolygons(data = epic_tx_sab,
+              fillOpacity = 0.3,
+              stroke = TRUE,
+              color = "black",
+              fillColor = "blue",
+              weight = 1)
+
+# EPIC's areas identical, which is exactly what you'd expect: 
+epic_xwalk_area <- sum(st_area(epic_xwalk))
+epic_all_area <- sum(st_area(epic_sab))
+
+# how much is this difference in area for the EPA?
+epa_sab_filter <- epa_sab %>% 
+  filter(state %in% states)
+epa_xwalk_area <- sum(st_area(epa_xwalk)) # 9.64e11
+epa_all_area <- sum(st_area(epa_sab_filter)) # 6.68e11
+# calculating percent diff - yikes this is ~44% different - but st_area on 
+# epa_sab_filter returns negative areas, so they aren't even comparable
+((epa_xwalk_area - epa_all_area)/epa_all_area)*100
+
+# how does epic's and epa's xwalk compare? About 10% different, so relatively 
+# minimal in comparison to the entire U.S. that we're working with 
+((epa_xwalk_area - epic_xwalk_area)/epic_xwalk_area)*100
+
+# checking out invalid geoms -  there are 10,570
+invalid_geom <- epa_sab_filter[which(!st_is_valid(epa_sab_filter)),]
+invalid_geom %>% 
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(state) %>%
+  summarize(total_invalid = n())
+
+
+# plotting to see what's going on, with a focus on TX: 
+invalid_geom_tx <- invalid_geom %>%
+  filter(state == "TX")
+
+# testing out different geos methods: 
+valid_geom <- st_make_valid(invalid_geom_tx, reason = TRUE, 
+                            geos_method = "valid_linework")
+sum(st_area(valid_geom))
+valid_geom_strucutre <- st_make_valid(invalid_geom_tx, 
+                                      reason = TRUE, 
+                                      geos_method = "valid_structure")
+sum(st_area(valid_geom_strucutre))
+
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.VoyagerNoLabels, group = "Toner Lite") %>%
+      addPolygons(data = valid_geom,
+              fillOpacity = 0.3,
+              stroke = TRUE,
+              color = "black",
+              fillColor = "blue",
+              weight = 1) %>%
+      addPolygons(data = epa_tx_sab,
+              fillOpacity = 0.3,
+              stroke = TRUE,
+              color = "black",
+              fillColor = "black",
+              weight = 1)  
+
+# hmm - it seems like valid linework matches the best... but can we confirm  
+# with area? 
+og_area <- sum(st_area(epa_tx_sab))
+valid_area <- st_make_valid(epa_tx_sab, reason = TRUE, 
+                            geos_method = "valid_linework")
+sum(st_area(valid_area))
+
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.VoyagerNoLabels, group = "Toner Lite") %>%
+      addPolygons(data = valid_area,
+              fillOpacity = 0.3,
+              stroke = TRUE,
+              color = "black",
+              fillColor = "blue",
+              weight = 1) %>%
+      addPolygons(data = epa_tx_sab,
+              fillOpacity = 0.3,
+              stroke = TRUE,
+              color = "black",
+              fillColor = "red",
+              weight = 1)  
+# hmm they look similar? 
+
+# comparing area calculating in a data frame: 
+epa_tx_sab_test <- st_area(epa_tx_sab)
+# xwalk_tx_sab_test <- st_area(epa_xwalk %>% filter(state == "TX"))
+valid_area_test <- st_make_valid(epa_tx_sab, reason = TRUE,
+                                 geos_method = "valid_linework")
+valid_area_test <- st_area(valid_area_test)
+area_comp <- data.frame(epa_geom = epa_tx_sab_test, 
+                        epa_valid_geom = xwalk_tx_sab_test)
+# that makes sense, since some of the area calculations in the original 
+# dataset are negative because the boundaries are invalid 
+
+
+# what if I compare EPA's area calculations with ours? 
+# hmm - I don't know their method for area calculations, nor do I know the 
+# units they used
+epa_xwalk$area_xwalk <- as.numeric((st_area(epa_xwalk)))
+ggplot(epa_xwalk, aes(x = shape_area, y = area_xwalk)) + 
+  geom_point() + 
+  geom_abline(intercept = 0, slope = 1) 
+
+test_diff_area <- epa_xwalk %>%
+  select(pwsid, shape_area, area_xwalk) %>%
+  mutate(shape_area = as.numeric(shape_area))
+
+
+# investigating NN state code: 
+epa_nn <- epa_sab %>%
+  filter(state == "NN")
+
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.VoyagerNoLabels, group = "Toner Lite") %>%
+  addPolygons(data = epa_nn,
+              fillOpacity = 0.3,
+              stroke = TRUE,
+              color = "black",
+              fillColor = "blue",
+              weight = 1)
+
+# investigating KYDOP pwsids: 
+epa_ky <- epa_sab %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  filter(state == "KY")
+```
+
+# Notes & Qs for EPA: 
+- There ~432 records with a blank state name, 2 with "NA" in the state column
+- There are 126 SABs where the state code is "NN", but I cant' get census data for the Navajo Nation with the function we currently have 
+- 21 SBAs in Kentucky have pwsids that start with "KYDOP" - many are very small and can't be interpolated or crosswalked 
+- There are ~10,570 geometries that are invalid 
+- To my knowledge, the unit of their area calculations (and how they specifically calculated area), is not in their data dictionary or methodology. 
+- Aside from 6 states (TN, IN, PA, KY, NH, TX), EPIC's dataset consistently has more SABs than the EPA's. The biggest difference is New York, where EPIC's dataset has 452 more SABs than the EPA's
+- FL has multiple pwsids that are appended together 
+- Utah has some pwsids that start with "UTAH"
+- There some pwsids in Washington that have letters "WA53AB285"
+
+
+## ________________ SAB Comparison Questions ______________________
+High priority
+# How many are there? Total water systems in dataset and total water systems in SDWIS (what is difference with systems that have been activated/deactivated since data was generated)
+Are there any missing/in hydroshare but not in new data and vice versa?
+```{r}
+total_epa_water_systems <- length(unique(epa_sab$pwsid))
+# there are 44,415 SABs in EPA's dataset 
+
+# how many are there in SDWIS?
+# querying SDWIS - this was created after Walker's code: 
+# options("scipen"=10, "digits"=4)
+# ws_url <- "https://data.epa.gov/efservice/WATER_SYSTEM/COUNT"
+# n_records_vi_xml <- xml2::read_xml(ws_url)
+# n_records_vi_ls <- xml2::as_list(n_records_vi_xml)
+# n_records_vi <- as.numeric(n_records_vi_ls$water_systemList$water_system$REQUESTRECORDCOUNT)
+# 
+# # Grabbing the first 100,000 records:
+# systems_raw <- data.table::fread("https://data.epa.gov/efservice/WATER_SYSTEM/ROWS/0:99999/csv",
+#                                  colClasses = "character")
+# # For loop requests records 100,000 to end and appends them to the first
+# # 100,000 records - you might have to run the loop in iterations because of
+# # internal service errors
+# for (i in 1:(ceiling(n_records_vi/1e5)-1)) {
+#   print(i)
+#   sys_url <- "https://data.epa.gov/efservice/WATER_SYSTEM/ROWS/"
+#   temp_url <- paste0(sys_url,
+#                      as.character(i*100000),
+#                      ":",
+#                      i*100000 + 99999,
+#                      "/CSV")
+#   dat <- data.table::fread(temp_url, colClasses = "character")
+#   systems_raw <- rbind(systems_raw, dat)
+# }
+
+# adding to aws: 
+# Writing this to s3: 
+# tmp <- tempfile()
+# write.csv(sdwis_ws, file = paste0(tmp, ".csv"))
+# on.exit(unlink(tmp))
+# put_object(
+#   file = paste0(tmp, ".csv"),
+#   object = "/service_area_boundaries/epa-sabs/sdwis-water-systems.csv",
+#   bucket = "tech-team-data",
+# )
+
+# reading from s3: 
+sdwis_ws <- aws.s3::s3read_using(read.csv, 
+                                 object = "/service_area_boundaries/epa-sabs/sdwis-water-systems.csv",
+                                 bucket = "tech-team-data")
+
+
+# we just care about the community water systems: 
+sdwis_cws <- sdwis_ws %>% 
+  filter(pws_type_code == "CWS")
+sdwis_pwsids <- length(unique(sdwis_cws$pwsid))
+# there are 96,376 pwsids in EPA's water systems database - some of which 
+# might be deactivated
+
+# also interested in deactivated systems: 
+deact_sdwis <- sdwis_cws %>%
+  filter(nchar(pws_deactivation_date) != 0) %>%
+  select(pwsid, pws_deactivation_date)
+
+# and active systems: 
+active_sdwis <- sdwis_cws %>%
+  filter(nchar(pws_deactivation_date) == 0)
+
+################################################################################
+# how many are matching?
+################################################################################
+# epa x sdwis: 
+epa_sab[which(epa_sab$pwsid %in% sdwis_cws$pwsid),]
+# 44,354 out of 44,415 - so there are 61 missing
+
+# epa x epic: 
+epa_sab[which(epa_sab$pwsid %in% epic_sab$pwsid),]
+# 44,115 out of 44,415 - so there are 300 missing 
+
+# epic x sdwis: 
+epic_sab[which(epic_sab$pwsid %in% sdwis_cws$pwsid),]
+
+################################################################################
+# comparing EPA & SDWIS
+################################################################################
+epa_sdwis_overlap <- epa_sab[which(epa_sab$pwsid %in% active_sdwis$pwsid),]
+
+epa_sdwis_overlap %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(symbology_field) %>%
+  summarize(total_sabs = n())
+
+# how many pwsids are in EPA's SABs dataset but NOT in sdwis and vice-versa?
+sdwis_not_sabs <- active_sdwis[which(!(active_sdwis$pwsid %in% epa_sab$pwsid)),]
+sabs_not_sdwis <- epa_sab[which(!(epa_sab$pwsid %in% active_sdwis$pwsid)),]
+
+# how many deactivated systems are in the EPA dataset? 165 - one of which 
+# was deactivated in 1988 - wowza!
+deact_sabs <- merge(deact_sdwis, sabs_not_sdwis)
+
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.VoyagerNoLabels, group = "Toner Lite") %>%
+  addPolygons(data = sabs_not_sdwis,
+              fillOpacity = 0.3,
+              stroke = TRUE,
+              color = "black",
+              fillColor = "blue",
+              weight = 1, 
+              label = sabs_not_sdwis$pwsid)
+
+# what are the characteristics of utilities that are in SDWIS not but the 
+# sabs dataset?
+missing_from_sabs <- sdwis_not_sabs %>%
+  group_by(primacy_agency_code) %>%
+  summarize(total_pwsids = length(unique(pwsid)))
+# okay, so they're really all across the board
+
+################################################################################
+# comparing EPA & hydroshare
+################################################################################
+epa_sab[which(epa_sab$pwsid %in% epic_sab$pwsid),]
+
+# how many pwsids are in EPA's SABs dataset but NOT in sdwis and vice-versa?
+epic_not_epa <- epic_sab[which(!(epic_sab$pwsid %in% epa_sab$pwsid)),]
+epa_not_epic <- epa_sab[which(!(epa_sab$pwsid %in% epic_sab$pwsid)),]
+
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.VoyagerNoLabels, group = "Toner Lite") %>%
+  addPolygons(data = epic_not_epa,
+              fillOpacity = 0.3,
+              stroke = TRUE,
+              color = "black",
+              fillColor = "blue",
+              weight = 1, 
+              label = epic_not_epa$pwsid)
+
+# what are the characteristics of the epic boundaries that are not in the 
+# EPA data set? 
+epic_not_epa %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(tier) %>%
+  summarize(total_sabs = n())
+
+state_sabs_missing_from_epa <- epic_not_epa %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(state_code) %>%
+  summarize(total_sabs = n())
+
+# what are the characteristics of the epic boundaries that matched?
+epic_epa_sab_overlap <- epic_sab[which(epic_sab$pwsid %in% epa_sab$pwsid),]
+
+epic_epa_sab_overlap %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(tier) %>%
+  summarize(total_sabs = n())
+
+epa_epic_sab_overlap <- epa_sab[which(epa_sab$pwsid %in% epic_sab$pwsid),]
+
+epa_epic_sab_overlap %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(symbology_field) %>%
+  summarize(total_sabs = n())
+
+# how many of these are deactivated systems? 
+epa_sabs_deactivated <- merge(epic_epa_sab_overlap, deact_sdwis)
+epic_not_epa_deactivated <- merge(epic_not_epa, deact_sdwis)
+epa_not_epic_deactivated <- merge(epa_not_epic, deact_sdwis)
+
+
+################################################################################
+# comparing hydroshare and SDWIS
+################################################################################
+epic_sdwis_overlap <- epic_sab[which(epic_sab$pwsid %in% active_sdwis$pwsid),]
+
+epic_sdwis_overlap %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(tier) %>%
+  summarize(total_sabs = n())
+
+# how many pwsids are in EPA's SABs dataset but NOT in sdwis and vice-versa?
+sdwis_not_sabs <- active_sdwis[which(!(active_sdwis$pwsid %in% epic_sab$pwsid)),]
+
+sdwis_not_sabs %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(state_code) %>%
+  summarize(total_sabs = n())
+
+sabs_not_sdwis <- epic_sab[which(!(epic_sab$pwsid %in% active_sdwis$pwsid)),]
+
+sabs_not_sdwis %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(tier) %>%
+  summarize(total_sabs = n())
+
+# how many deactivated systems are in the EPA dataset? 165 - one of which 
+# was deactivated in 1988 - wowza!
+deact_sabs <- merge(deact_sdwis, epic_sab)
+deact_sabs %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(tier) %>%
+  summarize(total_sabs = n())
+
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.VoyagerNoLabels, group = "Toner Lite") %>%
+  addPolygons(data = sabs_not_sdwis,
+              fillOpacity = 0.3,
+              stroke = TRUE,
+              color = "black",
+              fillColor = "blue",
+              weight = 1, 
+              label = sabs_not_sdwis$pwsid)
+
+################################################################################
+# comparing all of them together 
+################################################################################
+in_all_datasets <- epic_sab[which(epic_sab$pwsid %in% epa_sdwis_overlap$pwsid),]
+
+in_all_datasets %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(tier) %>%
+  summarize(total_sabs = n())
+
+epa_sab %>% 
+  filter(pwsid %in% in_all_datasets$pwsid) %>% 
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(symbology_field) %>%
+  summarize(total_sabs = n())
+
+active_sdwis %>%
+  filter(pwsid %in% in_all_datasets$pwsid) %>%
+  group_by(state_code) %>%
+  summarize(total_sabs = n())
+
+# finding those in EPA & EPIC, but not SDWIS: 
+epa_epic_not_sdwis <- epa_epic_sab_overlap %>%
+  filter(!(pwsid %in% active_sdwis$pwsid)) 
+
+epa_epic_not_sdwis %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(symbology_field) %>%
+  summarize(total_sabs = n())
+
+epic_sab %>%
+  filter(pwsid %in% epa_epic_not_sdwis$pwsid) %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(tier) %>%
+  summarize(total_sabs = n())
+
+epa_epic_not_sdwis_deact <- merge(epa_epic_not_sdwis, deact_sdwis)
+
+
+# finding those in EPIC & SDWIS, but not EPA: 
+epic_sdwis_not_epa <- epic_sdwis_overlap %>%
+  filter(!(pwsid %in% epa_sab$pwsid)) 
+
+epic_sdwis_not_epa %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(tier) %>%
+  summarize(total_sabs = n())
+
+active_sdwis %>%
+  filter(pwsid %in% epic_sdwis_not_epa$pwsid) %>%
+  group_by(state_code) %>%
+  summarize(total_sabs = n())
+
+# finding those in EPA & SDWIS, but not EPIC: 
+epa_sdwis_not_epic <- epa_sdwis_overlap %>%
+  filter(!(pwsid %in% epic_sab$pwsid)) 
+
+epa_sdwis_not_epic %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(symbology_field) %>%
+  summarize(total_sabs = n())
+
+active_sdwis %>%
+  filter(pwsid %in% epa_sdwis_not_epic$pwsid) %>%
+  group_by(state_code) %>%
+  summarize(total_sabs = n())
+
+
+# finding outer rings: ###
+# SDWIS: 
+just_sdwis <- active_sdwis %>%
+  filter(!(pwsid %in% c(epa_sdwis_not_epic$pwsid, 
+                        epic_sdwis_not_epa$pwsid, 
+                        in_all_datasets$pwsid)))
+just_sdwis %>%
+  group_by(state_code) %>%
+  summarize(total_sabs = n())
+
+# epic: 
+just_epic <- epic_sab %>%
+  filter(!(pwsid %in% c(epa_epic_not_sdwis$pwsid, 
+                        epic_sdwis_not_epa$pwsid, 
+                        in_all_datasets$pwsid)))
+just_epic %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(tier) %>%
+  summarize(total_sabs = n())
+
+just_epic_deact <- merge(just_epic, deact_sdwis)
+
+# epa: 
+just_epa <- epa_sab %>%
+  filter(!(pwsid %in% c(epa_sdwis_not_epic$pwsid, 
+                        epa_epic_not_sdwis$pwsid, 
+                        in_all_datasets$pwsid)))
+just_epa %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(symbology_field) %>%
+  summarize(total_sabs = n())
+
+just_epa_deact <- merge(just_epa, deact_sdwis)
+
+################################################################################
+# Adding a column flag for mapping each overlap scenario: 
+################################################################################
+# this should be a column in the epa_sab and epic_sab that shows each overlap
+# scenario - we can't plot the ones that are just_sdwis because they don't have 
+# any geospatial data 
+
+# working on epa first: 
+epa_sab_flag <- epa_sab
+epa_sab_flag <- epa_sab_flag %>%
+  mutate(boundary_cat = case_when(
+    pwsid %in% just_epa$pwsid ~ "EPA Dataset Only", 
+    pwsid %in% epa_epic_not_sdwis$pwsid ~ "EPA & EPIC, but not SDWIS", 
+    pwsid %in% epa_sdwis_not_epic$pwsid ~ "EPA & SDWIS, but not EPIC",
+    pwsid %in% in_all_datasets$pwsid ~ "In All Datasets"
+  ))
+# checking: 
+epa_sab_flag %>% 
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(boundary_cat) %>%
+  summarize(total = n())
+
+# moving to EPIC: 
+epic_sab_flag <- epic_sab
+epic_sab_flag_filtered <- epic_sab_flag %>%
+  mutate(boundary_cat = case_when(
+    pwsid %in% just_epic$pwsid ~ "EPIC Dataset Only", 
+    pwsid %in% epa_epic_not_sdwis$pwsid ~ "EPA & EPIC, but not SDWIS", 
+    pwsid %in% epic_sdwis_not_epa$pwsid ~ "EPIC & SDWIS, but not EPA",
+    pwsid %in% in_all_datasets$pwsid ~ "In All Datasets"
+  )) %>% 
+  filter(st_geometry_type(.) != "GEOMETRYCOLLECTION")
+
+# checking: 
+epic_sab_flag_filtered %>% 
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(boundary_cat) %>%
+  summarize(total = n())
+
+# can we plot this? this takes a loooong time to run 
+epic_boundary_pal <- colorFactor(viridis(6), epic_sab_flag_filtered$boundary_cat) 
+epa_boundary_pal <- colorFactor(viridis(6), epa_sab_flag$boundary_cat) 
+
+
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.VoyagerNoLabels, group = "Toner Lite") %>%
+  # getting a gray screen - 
+  # addProviderTiles(providers$OpenStreetMap) %>% 
+  addPolygons(data = epic_sab_flag_filtered,
+              opacity = 0.3,
+              color = ~epic_boundary_pal(epic_sab_flag_filtered$boundary_cat),
+              weight = 1, 
+              label = epic_sab_flag_filtered$boundary_cat)  %>%
+  # addPolygons(data = epa_sab_flag,
+  #             opacity = 0.3,
+  #             color = ~epa_boundary_pal(epa_sab_flag$boundary_cat),
+  #             weight = 1, 
+  #             label = epa_sab_flag$boundary_cat)  %>%
+  addLegend("bottomright", 
+            pal = epic_boundary_pal, 
+            values = epic_sab_flag$boundary_cat, 
+            title = "Boundary Category - EPIC") 
+  # addLegend("bottomright", 
+  #           pal = epa_boundary_pal, 
+  #           values = epa_sab_flag$boundary_cat, 
+  #           title = "Boundary Category - EPA") 
+
+
+
+# mapping: - creating a small subset 
+epa_sab_flag_tx <- epa_sab_flag %>%
+  filter(state == "TX")
+epic_sab_flag_tx <- epic_sab_flag %>%
+  filter(state_code == "TX")
+
+boundary_pal <- colorFactor(viridis(4), epa_sab_flag_tx$boundary_cat) 
+
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.VoyagerNoLabels, group = "Toner Lite") %>%
+  addPolygons(data = epa_sab_flag_tx,
+              fillOpacity = 0.3,
+              stroke = TRUE,
+              color = "black",
+              fillColor = ~boundary_pal(epa_sab_flag_tx$boundary_cat),
+              weight = 1, 
+              label = epa_sab_flag_tx$boundary_cat) %>%
+  addPolygons(data = epic_sab_flag_tx,
+              fillOpacity = 0.3,
+              stroke = TRUE,
+              color = "black",
+              fillColor = ~boundary_pal(epic_sab_flag_tx$boundary_cat),
+              weight = 1, 
+              label = epic_sab_flag_tx$boundary_cat) %>%
+  addLegend("bottomright", 
+            pal = boundary_pal, 
+            values = epic_sab_flag_tx$boundary_cat, 
+            title = "Boundary Category") 
+
+# checking how this all shakes out at the state level
+epa_state_boundary_summary <- epa_sab_flag %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(state, symbology_field, boundary_cat) %>%
+  summarize(epa_pwsids = n())
+
+epic_state_boundary_summary <- epic_sab_flag %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  mutate(tier_sym = case_when(
+    tier == 1 ~ "STATE", 
+    TRUE ~ "MODELED"
+  )) %>%
+  group_by(state_code, tier_sym, boundary_cat) %>%
+  summarize(epic_pwsids = n())
+
+all_state_boundary_summaries <- merge(epa_state_boundary_summary, 
+                                      epic_state_boundary_summary, 
+                                      by.x = c("state", "symbology_field", "boundary_cat"), 
+                                      by.y = c("state_code", "tier_sym", "boundary_cat"), 
+                                      all = T) %>%
+  # epic has these states but the EPA does not: 
+  filter(!(state %in% c("01", "09", "02", "10", "PR", "VI", "PQ", "ON", 
+                        "MP", "GU", "BC", "AP", "", "NN", "AS"))) %>%
+  filter(nchar(state) != 0)
+
+# visualizing 
+all_state_bound_sum_long <- pivot_longer(all_state_boundary_summaries, 
+                                         epa_pwsids:epic_pwsids)
+ggplot(all_state_bound_sum_long, aes(x = state, y = value, 
+                                     fill = symbology_field)) + 
+  geom_col(alpha = 0.8) + 
+  facet_wrap(~boundary_cat, 
+             scales = "free_y", 
+             ncol = 1) + 
+  theme_minimal()
+
+# would also like to save this dataset for future comparisons: 
+all_state_bound_sum_wide <- pivot_wider(all_state_bound_sum_long, 
+                                        names_from = boundary_cat, 
+                                        values_from = value)
+
+# Writing this to s3: 
+# tmp <- tempfile()
+# write.csv(all_state_bound_sum_wide, file = paste0(tmp, ".csv"))
+# on.exit(unlink(tmp))
+# put_object(
+#   file = paste0(tmp, ".csv"),
+#   object = "/service_area_boundaries/epa-sabs/results/state-boundary-categories.csv",
+#   bucket = "tech-team-data",
+# )
+
+# reading from s3: 
+all_state_bound_sum_wide <- aws.s3::s3read_using(read.csv, 
+                                 object = "/service_area_boundaries/epa-sabs/results/state-boundary-categories.csv",
+                                 bucket = "tech-team-data")
+```
+Results from this R chunk make more sense as venn diagrams, which are stored in this canva whiteboard: https://www.canva.com/design/DAGJQlZhCl8/3pj1EBOW_inCKS_Gdzw1EQ/edit?utm_content=DAGJQlZhCl8&utm_campaign=designshare&utm_medium=link2&utm_source=sharebutton
+
+
+# How do the number of SABs/state compare across EPIC, EPA, and SDWIS?
+```{r}
+# looking at differences in the number of SABs: 
+epa_states <- epa_sab %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(state) %>%
+  summarize(total_sabs_epa = n())
+
+epic_states <- epic_sab %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(state_code) %>%
+  summarize(total_sabs_epic = n())
+
+# merging and pivoting for easier calculations: 
+all_states_long <- merge(epa_states, epic_states, 
+                    by.x = "state", by.y = "state_code", all = T) %>%
+  pivot_longer(., cols = total_sabs_epa:total_sabs_epic)
+
+ggplot(all_states_long, aes(x = state, y = value, fill = name)) + 
+  geom_col(position = position_dodge()) + 
+  coord_flip() +
+  theme_minimal() 
+
+# what is the difference between the two?
+all_states <- merge(epa_states, epic_states, 
+                    by.x = "state", by.y = "state_code", all = T) %>%
+  mutate(diff_epa_epic = total_sabs_epa - total_sabs_epic)
+
+
+################################################################################
+# comparing total inventory of SABs across EPA, hydroshare, and SDWIS: 
+################################################################################
+# what is the difference between the number of sabs across all three?
+all_states <- merge(epa_states, epic_states, 
+                    by.x = "state", by.y = "state_code", all = T) %>%
+  mutate(diff_epa_epic = total_sabs_epa - total_sabs_epic)
+sdwis_states <- active_sdwis %>%
+  group_by(primacy_agency_code) %>%
+  summarize(total_sabs_sdwis = length(unique(pwsid)))
+
+all_states_sdwis <- merge(all_states, sdwis_states, 
+                    by.x = "state", by.y = "primacy_agency_code", all = T) %>%
+  select(-diff_epa_epic)
+
+# long for a quick plot: 
+all_states_sdwis_long <- all_states_sdwis %>%
+  pivot_longer(total_sabs_epa:total_sabs_sdwis)
+
+ggplot(all_states_sdwis_long, aes(x = state, y = value, color = name)) +
+  geom_point(size = 5, alpha = 0.3) + 
+  theme_minimal() + 
+  labs(y = "Number of Unique Water Systems", x = "") + 
+  coord_flip()
+
+# trying to find how often different values are closer to SDWIS; 
+all_states_noNA <- all_states_sdwis[ rowSums(is.na(all_states_sdwis)) == 0, ]
+all_states_comparison <- all_states_noNA %>%
+  mutate(diff_epa_sdwis = total_sabs_epa - total_sabs_sdwis, 
+         diff_epic_sdwis = total_sabs_epic - total_sabs_sdwis) %>%
+  mutate(winner = case_when(abs(total_sabs_epic - total_sabs_sdwis) < abs(total_sabs_epa - total_sabs_sdwis) ~ "epic", 
+                            TRUE ~ "EPA"))
+# finding mean off by winner: 
+epic_won <- all_states_comparison[all_states_comparison$winner == "epic", ]
+mean(epic_won$diff_epic_sdwis)
+epa_won <- all_states_comparison[all_states_comparison$winner == "EPA", ]
+mean(epa_won$diff_epa_sdwis)
+```
+
+
+# Are all types (crowdsourced/contributed) pwsids in EPA data?
+```{r}
+# how many boundaries are state reported? Do we have boundaries for similar 
+# states? 
+epa_state <- epa_sab %>% 
+  filter(symbology_field == "STATE")
+# 18,499
+
+epic_state <- epic_sab %>%
+  filter(tier == "1")
+# 18,606
+
+# need to filter odd geometycollections from states, which do not contain 
+# geometries we can plot (i.e., collection of linestrings)
+epic_state_filt <- epic_state %>% st_cast(.) %>% filter(st_geometry_type(.) != "GEOMETRYCOLLECTION")
+
+# what do these look like: 
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron,
+                   group = "Toner Lite") %>%
+  addPolygons(data = epa_state,
+              opacity = 0.3,
+              # stroke = TRUE,
+              # color = "black",
+              color = "#172f60",
+              weight = 1) %>%
+  addPolygons(data = epic_state_filt,
+              opacity = 0.3,
+              # stroke = TRUE,
+              # color = "black",
+              color = "#4ea324",
+              weight = 1) %>%
+  addLegend("bottomright", 
+            colors = c("#172f60", "#679966", 
+                       "#A0CB8C"),
+            labels = c("EPA", "Both", "EPIC"),
+            title = "State Boundaries",
+            opacity = 1)
+
+# what's the breakdown by state? 
+epa_state_sym <- epa_sab %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(state, symbology_field) %>%
+  summarize(num_epa_state = n())
+
+epic_state_sym <- epic_sab %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  mutate(symbology_field = case_when(
+    tier == "1" ~ "STATE", 
+    TRUE ~ "MODELED"
+  )) %>%
+  group_by(state_code, symbology_field) %>%
+  summarize(num_epic_state = n()) %>%
+  rename(state = state_code)
+
+# creating a summary table: 
+all_state_sym <- merge(epa_state_sym, epic_state_sym, 
+                       by = c("state", "symbology_field"), 
+                       all = T) %>%
+  filter(nchar(state) != 0) %>%
+  # epic has these states but the EPA does not: 
+  filter(!(state %in% c("01", "09", "02", "10", "PR", "VI", "PQ", "ON", 
+                        "MP", "GU", "BC", "AP", "", "NN", "AS"))) 
+
+# pivoting long for plotting: 
+all_state_sym_long <- pivot_longer(all_state_sym, num_epa_state:num_epic_state)
+ggplot(all_state_sym_long, aes(x = state, y = value, fill = name)) + 
+  geom_col(position = position_dodge()) + 
+  theme_minimal() + 
+  facet_wrap(~symbology_field, ncol = 1)
+ 
+
+# how many are in both: 
+epa_state_df <- epa_state %>%
+  as.data.frame() %>%
+  select(-starts_with("geom"))
+epic_state_df <- epic_state %>%
+  as.data.frame() %>%
+  select(-starts_with("geom"))
+
+epa_epic_tier_1 <- merge(epa_state_df, epic_state_df, by = "pwsid")
+# 15,443 of these are the same pwsid 
+```
+
+# Area coverage? Population coverage? Density? Table by state and variable hydroshare vs EPA layer Box plots??
+```{r}
+# basically want two dataframes for EPA & EPIC that shows by state using xwalks: 
+# first - filter by overlapping states 
+# area covered - by st_area() 
+# total pop - by sum(estimate_total_pop)
+# new pop density = total pop / area covered 
+# pop coverage - total pop/ total population for each state reported by 2020 ACS 
+
+# this filter shouldn't remove anything - extra territories were removed 
+# for crosswalking becuase we can't get census data for them 
+epa_xwalk_comp <- epa_xwalk %>% 
+  filter(state %in% unique(epic_xwalk$state))
+epic_xwalk_comp <- epic_xwalk
+
+# calculating summary stats for comparisons: 
+epa_xwalk_state <- epa_xwalk_comp %>% 
+  # calculating area and pop density for each sab
+  mutate(area = st_area(.), 
+         pop_density = estimate_total_pop/area) %>%
+  # converting to df to make calculations faster: 
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  # grabbing state summaries: 
+  group_by(state) %>%
+  summarize(epa_sabs = length(unique(pwsid)), 
+            epa_total_area = sum(area, na.rm = T),
+            epa_total_pop = sum(estimate_total_pop, na.rm = T), 
+            epa_mean_pop_den = mean(pop_density, na.rm = T))
+
+# calculating summary stats for comparisons: 
+epic_xwalk_state <- epic_xwalk_comp %>% 
+  st_make_valid(.) %>%
+ # calculating area and pop density for each sab
+  mutate(area = st_area(.), 
+         pop_density = estimate_total_pop/area) %>%
+  # converting to df to make calculations faster: 
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  # grabbing state summaries: 
+  group_by(state) %>%
+  summarize(epic_sabs = length(unique(pwsid)), 
+            epic_total_area = sum(area, na.rm = T),
+            epic_total_pop = sum(estimate_total_pop, na.rm = T), 
+            epic_mean_pop_den = mean(pop_density, na.rm = T))
+
+# combining;
+state_sab_comp <- merge(epa_xwalk_state, epic_xwalk_state)
+
+# also want SDWIS pop served estimates as well: 
+active_sdwis_pop <- active_sdwis %>%
+  group_by(state_code) %>%
+  summarize(cws_pop_sdwis = sum(population_served_count), 
+            cws_sabs = length(unique(pwsid))) %>%
+  rename(state = state_code)
+
+state_sab_comp_cws <- merge(state_sab_comp, active_sdwis_pop, by = "state")
+
+# finding state populations in 2020 
+state_census <- tidycensus::get_acs(
+    geography = "state", 
+    variables = c(state_census_pop = "B01003_001"), 
+    year = 2020
+    )
+
+state_census <- state_census %>% 
+  select(-c(GEOID, moe, variable)) %>%
+  rename(state_census_pop = estimate, 
+         state = NAME)
+
+# grabbing state abbr for merging: 
+st_crosswalk <- tibble(state = state.name) %>%
+   bind_cols(tibble(abb = state.abb)) %>% 
+   bind_rows(tibble(state = "District of Columbia", abb = "DC"))
+
+state_census_tidy <- state_census %>% 
+  left_join(st_crosswalk, by = "state") %>%
+  rename(state_long = state, 
+         state = abb) %>%
+  select(-state_long)
+
+# combining with summary stats: 
+state_sab_comp_f <- merge(state_sab_comp_cws, state_census_tidy) 
+
+
+
+# comparing pops: 
+pop_comp <- state_sab_comp_f %>%
+  select(contains("pop"), "state") %>%
+  select(-contains("den"))
+
+pop_comp_long <- pop_comp %>%
+  pivot_longer(epa_total_pop:state_census_pop)
+
+ggplot(pop_comp_long, aes(x = reorder(state, -value), y = value, fill = name)) + 
+  geom_col(position = position_dodge()) +
+  theme_minimal() + 
+  labs(x = "", y = "Number of People") + 
+  ggtitle("EPA & Hydroshare Dataset: Comparison of Populations by State") + 
+  scale_fill_discrete(name = "")
+
+pop_comp_long_mini <- pop_comp_long %>%
+  filter(!(name %in% c("state_census_pop", "cws_pop_sdwis")))
+  
+ggplot(pop_comp_long_mini, aes(x = reorder(state, -value), 
+                               y = value, fill = name)) + 
+  ggchicklet::geom_chicklet(position = position_dodge(), alpha = 0.7) +
+  theme_minimal() + 
+  scale_fill_manual(name = "", labels = c("EPA", "EPIC"), 
+                      values = epic_palette(2)) + 
+  coord_flip() + 
+    theme(legend.position = "bottom", 
+        text = element_text(size = 13, family = "Lato")) + 
+  # buffering around axis titles so the axis labels can breathe a bit more 
+  labs(x = "\nState", y = "Number of People") + 
+  scale_y_continuous(breaks=seq(0, 40000000, 10000000), 
+                     labels = scales::label_comma())
+
+# creating a plot of difference in number: 
+pop_comp <- pop_comp %>%
+  mutate(epic_epa_diff = epic_total_pop - epa_total_pop)
+
+ggplot(pop_comp, aes(x = reorder(state, -epic_epa_diff), 
+                     y = epic_epa_diff)) + 
+  geom_segment(aes(x =  reorder(state, -epic_epa_diff), 
+                   xend = state, y = 0, yend = epic_epa_diff))  + 
+  geom_point(data = pop_comp %>% filter(epic_epa_diff < 0), 
+             color = epic_palette(1), size=3, alpha = 0.7) +
+  geom_point(data = pop_comp %>% filter(epic_epa_diff > 0), 
+             color = "#4ea324", size=3, alpha = 0.7) +
+  theme_minimal() + 
+  coord_flip() +
+  theme(legend.position = "bottom", 
+        text = element_text(size = 13, family = "Lato")) + 
+  # buffering around axis titles so the axis labels can breathe a bit more 
+  labs(x = "\nState", y = "Difference in Population Served (EPIC - EPA)") + 
+  scale_y_continuous(breaks=seq(-2000000, 2000000, 1000000), 
+                     labels = scales::label_comma())
+
+# comparing sabs: 
+sab_comp <- state_sab_comp_f %>%
+  select(state, contains("sab")) 
+
+sab_comp_long <- sab_comp %>%
+  pivot_longer(epa_sabs:cws_sabs)
+
+ggplot(sab_comp_long, aes(x = reorder(state, -value), y = value, fill = name)) + 
+  geom_col(position = position_dodge()) +
+  theme_minimal() + 
+  labs(x = "", y = "Number of SABs") + 
+  ggtitle("EPA & Hydroshare Dataset: Comparison of SABs by State") + 
+  scale_fill_discrete(name = "")
+
+sab_comp_mini <- sab_comp_long %>%
+  filter(name != "cws_sabs")
+
+ggplot(sab_comp_mini, aes(x = reorder(state, -value), 
+                               y = value, fill = name)) + 
+  ggchicklet::geom_chicklet(position = position_dodge(), alpha = 0.7) +
+  theme_minimal() + 
+  labs(x = "State", y = "Number of SABs") + 
+  # ggtitle("EPA & Hydroshare Dataset: Comparison of Populations by State") + 
+  scale_fill_manual(name = "", labels = c("EPA", "EPIC"), 
+                      values = epic_palette(2)) + 
+  coord_flip() + 
+  scale_y_continuous(breaks=seq(0, 5000, 1000), 
+                     labels = scales::label_comma()) + 
+    theme(legend.position = "bottom", 
+        text = element_text(size = 13, family = "Lato")) + 
+  # buffering around axis titles so the axis labels can breathe a bit more 
+  labs(x = "\nState", y = "Number of SABs")
+
+# creating a plot of difference in number: 
+sab_comp <- sab_comp %>%
+  mutate(epic_epa_diff = epic_sabs - epa_sabs)
+
+ggplot(sab_comp, aes(x = reorder(state, -epic_epa_diff), 
+                     y = epic_epa_diff)) + 
+  geom_segment(aes(x =  reorder(state, -epic_epa_diff), 
+                   xend = state, y = 0, yend = epic_epa_diff))  + 
+  geom_point(data = sab_comp %>% filter(epic_epa_diff < 0), 
+             color = epic_palette(1), size=3, alpha = 0.7) +
+  geom_point(data = sab_comp %>% filter(epic_epa_diff > 0), 
+             color = "#4ea324", size=3, alpha = 0.7) +
+  theme_minimal() + 
+  coord_flip() +
+  theme(legend.position = "bottom", 
+        text = element_text(size = 13, family = "Lato")) + 
+  # buffering around axis titles so the axis labels can breathe a bit more 
+  labs(x= "\nState", y = "Difference in SABs (EPIC - EPA)")
+
+
+# comparing area: 
+area_comp <- state_sab_comp_f %>%
+  select(state, contains("area")) 
+
+area_comp_long <- area_comp %>%
+  pivot_longer(epa_total_area:epic_total_area) %>%
+  mutate(value = as.numeric(value))
+
+ggplot(area_comp_long, aes(x = reorder(state, -value), y = value, fill = name)) + 
+  geom_col(position = position_dodge()) +
+  theme_minimal() + 
+  labs(x = "", y = "Area Covered by SABs (m^2)") + 
+  ggtitle("EPA & Hydroshare Dataset: Comparison of total SAB area by State") + 
+  scale_fill_discrete(name = "")
+
+
+# what about % of population served by CWS?
+state_sab_comp_f_per <- state_sab_comp_f %>%
+  mutate(pop_served_cws_per_sdwis = 100*(cws_pop_sdwis/state_census_pop),
+         pop_served_cws_per_epa = 100*(epa_total_pop/state_census_pop),
+         pop_served_cws_per_epic = 100*(epic_total_pop/state_census_pop))
+
+# adding to aws results folder: 
+# tmp <- tempfile()
+# write.csv(state_sab_comp_f_per, file = paste0(tmp, ".csv"))
+# on.exit(unlink(tmp))
+# put_object(
+#   file = paste0(tmp, ".csv"),
+#   object = "/service_area_boundaries/epa-sabs/results/state-utility-comparisons.csv",
+#   bucket = "tech-team-data",
+# )
+# reading from s3: 
+state_sab_comp_f_per <- aws.s3::s3read_using(read.csv, 
+                                 object = "/service_area_boundaries/epa-sabs/results/state-utility-comparisons.csv",
+                                 bucket = "tech-team-data")
+
+# plotting percentages: 
+per_comp <- state_sab_comp_f_per %>%
+  select(state, contains("per")) 
+
+per_comp_long <- per_comp %>%
+  pivot_longer(pop_served_cws_per_sdwis:pop_served_cws_per_epic)
+
+ggplot(per_comp_long, aes(x = reorder(state, -value), y = value, fill = name)) + 
+  geom_col(position = position_dodge()) +
+  theme_minimal() + 
+  labs(x = "", y = "% State Population Served by CWS") + 
+  ggtitle("EPA & Hydroshare Dataset: Comparison of % State Population Served by CWS") + 
+  scale_fill_discrete(name = "") + 
+  geom_hline(yintercept = 100, lty = "dashed")
+
+
+
+# instead of state-level plots and data frames, can I create scatter plots? 
+epa_xwalk_pwsid <- epa_xwalk_comp %>% 
+  # calculating area and pop density for each sab
+  mutate(area = st_area(.), 
+         pop_density = estimate_total_pop/area) %>%
+  # converting to df to make calculations faster: 
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  mutate(flag = "epa") %>%
+  select(state, flag, pwsid, area, estimate_total_pop, pop_density)
+
+
+epic_xwalk_pwsid <- epic_xwalk_comp %>% 
+  # calculating area and pop density for each sab
+  mutate(area = st_area(.), 
+         pop_density = estimate_total_pop/area) %>%
+  # converting to df to make calculations faster: 
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  mutate(flag = "epic") %>%
+  select(state, flag, pwsid, area, estimate_total_pop, pop_density)
+
+# binding for easier plotting: 
+boxplot_comp <- rbind(epa_xwalk_pwsid, epic_xwalk_pwsid)
+boxplot_comp_long <- boxplot_comp %>%
+  mutate(area = as.numeric(area), 
+         pop_density = as.numeric(pop_density)) %>%
+  pivot_longer(area:pop_density)
+
+ggplot(boxplot_comp_long, aes(x = state, y = value, color = flag)) + 
+  geom_boxplot() + 
+  theme_minimal() + 
+  facet_wrap(~name, ncol = 1, scales = "free") + 
+  labs(x = "", y = "Value") + 
+  scale_color_discrete(name = "") 
+```
+
+# Building a dataset of dominant type of boundary by state: 
+```{r}
+sab_state_summary <- epa_sab %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(state, symbology_field) %>%
+  summarize(total_sabs = n(), 
+            sum_pop = sum(population_served_count, na.rm = T))
+
+state_sab_summary_wide <- sab_state_summary %>%
+  select(-sum_pop) %>%
+  pivot_wider(., names_from = "symbology_field", values_from = "total_sabs") %>%
+  mutate_all(~replace(., is.na(.), 0)) %>%
+  mutate(main_sym_type = case_when(
+    MODELED > STATE ~ "Modeled", 
+    STATE > MODELED ~ "State", 
+    STATE == MODELED ~ "Modeled = State")) %>%
+  mutate(percent_modeled = 100*(MODELED/(MODELED + STATE)), 
+         percent_state = 100*(STATE/(MODELED + STATE)))
+```
+
+# Investigating utilities with large differences between crosswalks: 
+```{r}
+# reading demographic comparison results: 
+# TODO - file passed from Gabe via slack on 6/28 - pulling from aws 
+# when it gets thrown up there 
+demo_results <- read.csv("./results/results_df_summary_ 2024-06-28.csv") %>%
+  select(-X)
+
+options(scipen = 999999)
+
+# calculating areas for epic and epa sabs: 
+epic_sab_geom_area <- epic_xwalk %>%
+  filter(pwsid %in% demo_results$pwsid) %>%
+  select(pwsid) %>%
+  mutate(epic_area = st_area(.)) 
+
+epa_sab_geom_area <- epa_xwalk %>%
+  filter(pwsid %in% demo_results$pwsid) %>%
+  select(pwsid) %>%
+  mutate(epa_area = st_area(.)) 
+
+epic_sab_geom_area_df <- epic_sab_geom_area %>%
+  as.data.frame() %>%
+  select(-starts_with("geom"))
+
+# also wondering the type of xwalk method that was used: 
+epic_sab_xwalk_method <- epic_xwalk %>%
+  filter(pwsid %in% demo_results$pwsid) %>%
+  select(pwsid, state, tier_crosswalk)%>%
+  as.data.frame() %>%
+  select(-starts_with("geom"))
+
+epa_sab_xwalk_method<- epa_xwalk %>%
+  filter(pwsid %in% demo_results$pwsid) %>%
+  select(pwsid, state, tier_crosswalk) %>%
+  as.data.frame() %>%
+  select(-starts_with("geom"))
+
+sab_xwalks <- merge(epic_sab_xwalk_method, epa_sab_xwalk_method, 
+                    by = c("pwsid", "state")) %>%
+  rename(epic_xwalk_method = tier_crosswalk.x, 
+         epa_xwalk_method = tier_crosswalk.y)
+
+# calculating differences in area: 
+demo_area <- merge(epic_sab_geom_area_df, epa_sab_geom_area) %>%
+  left_join(demo_results) %>%
+  mutate(epa_area = as.numeric(epa_area), 
+         epic_area = as.numeric(epic_area)) %>%
+  mutate(diff_area = epa_area - epic_area, 
+         diff_pop = estimate_total_pop_epa - estimate_total_pop_epic) %>%
+  relocate(diff_area) %>%
+  left_join(sab_xwalks) %>%
+  mutate(xwalk_summary = paste0("epic: ", epic_xwalk_method, " epa: ", epa_xwalk_method))
+
+# comparing as a scatterplot: 
+ggplot(demo_area, aes(x = diff_area, y = diff_pop, 
+                      color = xwalk_summary)) + 
+  geom_point(size = 2, alpha = 0.4) + 
+  labs(x = "EPA Area - EPIC Area", y = "EPA Pop - EPIC Pop") + 
+  theme_minimal() + 
+  ggtitle("Comparing Area, Population, and Crosswalk Method Differences")
+  # facet_wrap(~xwalk_summary, 
+  #            ncol = 4, scales = "free") + 
+  # theme(legend.position = "none")
+
+# what is the inventory of crosswalk methods by state? ideally they should 
+# be the same
+state_xwalk_summary <- demo_area %>%
+  group_by(state, xwalk_summary) %>%
+  summarize(total_sabs = n())
+
+ggplot(state_xwalk_summary, aes(x = state, y = total_sabs, fill = xwalk_summary)) + 
+  geom_col() + 
+  theme_minimal() +
+  theme(legend.position = "bottom")  + 
+  coord_flip()
+
+# what about just overall? 
+overall_xwalk_inventory <- demo_area %>%
+  group_by(xwalk_summary) %>%
+  summarize(total_sabs = n())
+
+```
+Interesting - most are tier 1 x tier 1 = along similar areas (i.e., y = 0), generally populations are similar. If they're not, then it's possible that the boundaries slightly shifted (while maintaining similar area), such that the new boundary encountered a different census geography. As the areas become more different, generally so do populations, however, at large differences in area, the populations are relatively similar. 
+
+# Investigating sabs with invalid geometries: 
+```{r}
+# which ones are invalid? 
+sf_use_s2(FALSE)
+invalid_geom <- epa_sab[which(!st_is_valid(epa_sab)),]
+invalid_geom %>% 
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(symbology_field) %>%
+  summarize(n())
+# When spherical geometry is off, there are 10,788 boundaries that are invalid. 
+# about 90% of these are modeled 
+
+# if we turn on spherical geometry... 
+sf_use_s2(TRUE)
+invalid_geom <- epa_sab[which(!st_is_valid(epa_sab)),]
+invalid_geom %>% 
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(symbology_field) %>%
+  summarize(n())
+# When spherical geometry is turned on, 529 are invalid, and 
+# only one is state reported 
+
+# seeing if QGIS also thinks these are invalid: 
+# st_write(invalid_geom, "./data/geom_test.geojson")
+# QGIS returns: "Feature (0) from “geom_test” has invalid geometry. Please fix the geometry or change the “Invalid features filtering” option for this input or globally in Processing settings."
+
+```
+
+# List of outliers for the EPA
+```{r}
+epa_sab <- aws.s3::s3read_using(st_read, 
+                                object = "service_area_boundaries/epa-sabs/epa-sabs-all.geojson",
+                                bucket = "tech-team-data")
+
+# grabbing reason for invalid geometries: 
+sf_use_s2(TRUE) # using s2:
+invalid_reason <- st_is_valid(epa_sab, reason = TRUE) 
+invalid_reason_df <- data.frame(pwsid = epa_sab$pwsid, geom_invalid_reason = invalid_reason)
+
+# grabbing invalid geometries: 
+outliers <- epa_sab[!st_is_valid(epa_sab),] %>%
+  mutate(reason = "Invalid Geometry") %>%
+  left_join(invalid_reason_df)
+# NA states appear to just be quite a few tribal communities 
+
+# for those that are valid, which ones have wild pop density: 
+valid_geom <- epa_sab[st_is_valid(epa_sab),] %>%
+    mutate(area_miles = as.numeric(sf::st_area(.))) %>%
+    mutate(area_miles = area_miles/27880000) %>%
+    mutate(pop_density = population_served_count / area_miles)
+
+# locating outliers: 
+na_pop_density <- epa_sab[(is.na(epa_sab$population_served_count) | epa_sab$population_served_count == 0),] %>%
+  mutate(reason = "NA Pop Served or Pop Served is 0")
+# all of these are missing pop_served_count
+
+summary(valid_geom)
+ #  pop_density       
+ # Min.   :0.000e+00  
+ # 1st Qu.:5.972e+03  
+ # Median :1.408e+04  
+ # Mean   :2.519e+05  
+ # 3rd Qu.:3.504e+04  
+ # Max.   :7.736e+09  
+ # NA's   :68  
+
+# what's the higher quantile?
+quantile(valid_geom$pop_density, 0.975, na.rm = T)
+# yikes - many of these are very high - setting a cap at 50,000 instead:
+
+# list of pwsids where pop density > 50,000 (NYC is 30,000)
+pop_density_high <- valid_geom %>% 
+  filter(pop_density > 50000) %>%
+  mutate(reason = "Population Density > 50,000 people/sqmi")
+
+outliers_final <- bind_rows(outliers, pop_density_high, na_pop_density)
+
+# tidying to simple df by pwsid: 
+outliers_df <- outliers_final %>%
+  as.data.frame() %>% 
+  select(-"geometry") %>%
+  # select(pwsid, method, population_served_count, area_miles, pop_density, reason, geom_invalid_reason) %>%
+  group_by(pwsid, method, population_served_count, area_miles, pop_density, geom_invalid_reason) %>%
+  reframe(reason = paste0(unique(reason))) %>%
+  unnest(reason)
+
+write.csv(outliers_df, "./results/epa_outliers.csv")
+
+outliers_df %>%
+  group_by(reason, method) %>%
+  summarize(total_sabs = n(), 
+            total_pop = sum(population_served_count, na.rm = T))
+```
+
+# Figures for EPA SABs blog
+```{r}
+# grabbing total number of SABs and population totals: 
+epa_pop <- epa_sab %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(symbology_field) %>%
+  summarize(total_sabs = n(), 
+            total_population = sum(population_served_count, na.rm = T), 
+            mean_population = mean(population_served_count, na.rm = T), 
+            median_population = median(population_served_count, na.rm = T))  %>%
+  mutate(dataset = "EPA") %>%
+  relocate(dataset)
+
+epic_pop <- epic_sab_valid %>% 
+  mutate(symbology_field = case_when(
+    tier == 1 ~ "STATE", 
+    TRUE ~ "MODELED"
+  )) %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(symbology_field) %>%
+  summarize(total_sabs = n(), 
+            total_population = sum(population_served_count, na.rm = T), 
+            mean_population = mean(population_served_count, na.rm = T), 
+            median_population = median(population_served_count, na.rm = T)) %>%
+  mutate(dataset = "EPIC") %>%
+  relocate(dataset)
+
+pop <- bind_rows(epic_pop, epa_pop)
+
+# calculating areas - need to filter for outliers and turn on spherical 
+# geometry
+sf_use_s2(TRUE)
+sum(!st_is_valid(epic_sab))
+sum(!st_is_valid(epa_sab))
+
+# removing invalid geometries: 
+epic_sab_valid <- epic_sab %>%
+  filter(st_is_valid(.))
+epa_sab_valid <- epa_sab %>%
+  filter(st_is_valid(.))
+
+epic_sab_pop_den <- epic_sab_valid %>% 
+  mutate(symbology_field = case_when(
+    tier == 1 ~ "STATE", 
+    TRUE ~ "MODELED"
+  )) %>%
+  # gotta make these valid, otherwise I can't calculate area:
+  st_make_valid(.) %>%
+  mutate(area_miles = as.numeric(sf::st_area(.))) %>%
+  # removing zero area
+  filter(area_miles > 0) %>%
+  mutate(area_miles = area_miles/27880000) %>%
+  mutate(pop_density = population_served_count / area_miles) %>%
+  # removing outlier pop densities: 
+  filter(pop_density < 50000)
+
+epic_summary <- epic_sab_pop_den %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(symbology_field) %>%
+  summarize(total_area = sum(area_miles, na.rm = T), 
+            mean_area = mean(area_miles, na.rm = T), 
+            median_area = median(area_miles, na.rm = T), 
+            mean_pop_density = mean(pop_density, na.rm = T), 
+            median_pop_density = median(pop_density, na.rm = T)) %>%
+  mutate(dataset = "EPIC") %>%
+  relocate(dataset)
+
+
+# table with high-level stats?
+epa_sab_pop_den <- epa_sab_valid %>% 
+  # gotta make these valid, otherwise I can't calculate area:
+  st_make_valid(.) %>%
+  mutate(area_miles = as.numeric(sf::st_area(.))) %>%
+  # removing zero area
+  filter(area_miles > 0) %>%
+  mutate(area_miles = area_miles/27880000) %>%
+  mutate(pop_density = population_served_count / area_miles) %>%
+  # removing outlier pop densities: 
+  filter(pop_density < 50000)
+
+epa_summary <- epa_sab_pop_den %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(symbology_field) %>%
+  summarize(total_area = sum(area_miles, na.rm = T), 
+            mean_area = mean(area_miles, na.rm = T), 
+            median_area = median(area_miles, na.rm = T), 
+            # epa_sd_area = sd(area_miles, na.rm = T), 
+            # total_pop_density = sum(pop_density, na.rm = T), 
+            mean_pop_density = mean(pop_density, na.rm = T), 
+            median_pop_density = median(pop_density, na.rm = T)) %>%
+  mutate(dataset = "EPA") %>%
+  relocate(dataset) %>%
+  filter(!is.na(symbology_field))
+
+summary_all <- bind_rows(epa_summary, epic_summary) 
+
+# merging - this is the stats used in the blog
+summary_table <- merge(pop, summary_all, by = c("dataset", "symbology_field"))
+
+
+# map of boundaries - seeing where state modeled boundaries stepped in for 
+# tier 2 and 3 epic boundaries. Map would show how methodology type 
+# changes by SAB 
+epic_sab_map <- epic_sab %>%
+  select(pwsid, tier) %>%
+  as.data.frame() %>%
+  select(-starts_with("geom"))
+
+epa_sab_map <- epa_sab %>%
+  select(pwsid, method)
+
+method_comp <- merge(epa_sab_map, epic_sab_map, by = "pwsid")
+
+# only keep ones that are in both: 
+method_complete <- method_comp %>%
+  filter(!is.na(tier)) %>%
+  mutate(tier = case_when(
+    tier %in% c("2", "3") ~ "Census Place, Centroid", 
+    TRUE ~ "State"
+  )) %>%
+  # removing some of the other EPA categories - there are relatively few 
+  # and I wanted to specifically look at decision tree and random forests 
+  filter(method %in% c("State", "Random Forest", "Decision Tree")) %>%
+  mutate(epic_epa_method = paste0("EPIC: ", tier, " -> EPA: ", method))  
+  # filter(st_is_valid(.))
+
+# how many are in each? 
+method_complete %>%
+  as.data.frame() %>%
+  select(-starts_with("geom")) %>%
+  group_by(epic_epa_method) %>%
+  summarize(total = n())
+
+# specifying levels for legend order: 
+leg_order <- c(
+    "EPIC: State -> EPA: Decision Tree", 
+    "EPIC: Census Place, Centroid -> EPA: Decision Tree",
+    "EPIC: State -> EPA: Random Forest", 
+    "EPIC: Census Place, Centroid -> EPA: Random Forest",
+    "EPIC: State -> EPA: State", 
+    "EPIC: Census Place, Centroid -> EPA: State")
+
+method_pal <- colorFactor(
+  palette = viridis::viridis(6),
+  domain = leg_order, 
+  levels = leg_order,
+  ordered = T)
+
+# bringing everything together! 
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron,
+                   group = "Toner Lite") %>%
+  addPolygons(data = method_complete,
+              opacity = 0.8,
+              color = ~method_pal(epic_epa_method),
+              weight = 1) %>%
+  addLegend("bottomright",
+            pal = method_pal,
+            values = method_complete$epic_epa_method,
+            title = "Method Comparison") %>%
+  setView(lng = -95.665, lat = 37.6, zoom = 4)
+
+# map
+# # v this 100% crashed my computer, not just R 
+# mapview::mapshot(map, file = "~/results/method_map.png")
+```
+
+
+
+
+
