@@ -1,4 +1,4 @@
-![](www/epic-logo-transparent.png)
+![](epic-logo-transparent.png)
 
 # EPIC's Service Area Boundaries & Census Data Crosswalk
 This repository maintains the code and data for crosswalking census data to EPA's water utility boundaries. Crosswalking is done using a mix of population weighted interpolation and block-parcel crosswalks (see methodology for more information). Using the functions in this repository and a template spreadsheet to hold census varaibles, it's possible to crosswalk any collection of census variables to water utility service area boundaries. 
