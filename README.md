@@ -7,6 +7,8 @@ Link to [census variables](https://docs.google.com/spreadsheets/d/1UvFjxOm1Q06ZE
 
 Link to [methodology](https://docs.google.com/document/d/1va2Iq2oJxnqiwgNHD4bWpXKxdWbq-TYoYkosj1oz_JU/edit?tab=t.0) for TX analysis. Full methodology coming soon. 
 
+Link to [resulting data](https://tech-team-data.s3.us-east-1.amazonaws.com/service_area_boundaries/epa-sabs/epic-epa-sabs-public_dec_24.zip) for public use. *Last updated December 16, 2024*
+
 
 This repository includes:
 
