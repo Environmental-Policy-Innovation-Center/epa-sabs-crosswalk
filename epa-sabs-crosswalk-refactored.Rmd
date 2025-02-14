@@ -7,8 +7,6 @@ output: html_document
 
 Setting up environment - libraries & datasets: 
 ```{r}
-# TODO - overall methods doc???
-
 # functions for pulling in SABs & census variable sheet
 library(googlesheets4)
 library(aws.s3)
@@ -82,6 +80,8 @@ pwsid_tract_crosswalk <- pwsid_blockgroup_crosswalk %>%
 #   filter(state == "NN")
 # 
 # test_mult_states <- sab_crosswalk(sab_test, "2021", census_var_sheet)
+
+# all_census_vars <- load_variables(2021, "acs5", cache = TRUE)
 
 # run the xwalk nationally:
 full_xwalk <- sab_crosswalk(epa_sabs, "2021", census_var_sheet)

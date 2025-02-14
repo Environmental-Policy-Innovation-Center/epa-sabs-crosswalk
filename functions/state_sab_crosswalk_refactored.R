@@ -75,20 +75,30 @@ sab_crosswalk <- function(sab_f, acs_year, census_var_sheet) {
   ##############################################################################
   # Function checks
   ##############################################################################
-  # make sure census vars are all uppercase:
+  # make sure census vars are all uppercase and remove any stray spaces
+  # from strings: 
   census_var_sheet <- census_var_sheet %>%
-      mutate(var = toupper(var))
+      mutate(var = toupper(var), 
+             var = str_squish(var)) 
   
   # make sure total_pop is included: 
   if(!("total_pop" %in% census_var_sheet$name)){
-   stop("total_pop census variable is missing") 
+   stop("The total_pop census variable is missing") 
   }
   
   # make sure all numerators have a universe value: 
   numerators <- census_var_sheet %>%
     filter(category == "numerator")
   if(any(is.na(numerators$universe))){
-    stop("all numerator variables need a universe") 
+    stop("All numerator variables need a universe") 
+  }
+  
+  # make sure all non-income variables have an interpolation value: 
+  census_interp_vars <- census_var_sheet %>%
+    filter(!is.na(var)) %>%
+    filter(category == "numerator")
+  if(any(is.na(census_interp_vars$interp_method))){
+    stop("Provide an interpolation method for non-income variables") 
   }
   
   ##############################################################################
@@ -417,7 +427,7 @@ sab_crosswalk <- function(sab_f, acs_year, census_var_sheet) {
     select(GEOID, extensive_hh_vars$name)
   # pop weighted interpolation on median household income using spatially 
   # intensive because we essentially want a weighted mean:
-  message("Tier 1: population weighted interoplation on mhi")
+  message("Tier 1: population weighted interoplation on income variables")
   pw_interp_inc <- interpolate_pw(
     from = state_wide_inc,
     to = sab,
